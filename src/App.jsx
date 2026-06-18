@@ -4,6 +4,7 @@ import { createClient } from "@supabase/supabase-js";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from "recharts";
+import { SpeedInsights } from "@vercel/speed-insights/react";
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -500,6 +501,7 @@ export default function FaturasApp() {
         button:hover { background: #F1EFE8 !important; }
         input[type="text"]:focus { outline: 2px solid ${COPPER}; outline-offset: 1px; }
       `}</style>
+      <SpeedInsights />
     </div>
   );
 }
