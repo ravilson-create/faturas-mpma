@@ -5,8 +5,8 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from "recharts";
 
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const SUPABASE_URL = "https://zvwwquwlesjppmzkhmtn.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inp2d3dxdXdsZXNqcHBtemtobXRuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE3OTM3MTUsImV4cCI6MjA5NzM2OTcxNX0.HALwLmkZ_xCs7wfojDJ4vaBRO7Y-KkDNCGs2cfj8yBY";
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 const COPPER = "#BA7517";
