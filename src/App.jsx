@@ -194,16 +194,28 @@ export default function FaturasApp() {
 
   const carregarRegistros = useCallback(async () => {
     setLoading(true);
-    const { data, error: err } = await supabase
-      .from("faturas")
-      .select("*")
-      .order("mes_referencia", { ascending: true });
-    if (err) {
-      setError("Não foi possível carregar os dados do banco: " + err.message);
-    } else {
-      setRegistros(data || []);
+    try {
+      const PAGE = 1000;
+      let todos = [];
+      let pagina = 0;
+      while (true) {
+        const { data, error: err } = await supabase
+          .from("faturas")
+          .select("*")
+          .order("mes_referencia", { ascending: true })
+          .range(pagina * PAGE, (pagina + 1) * PAGE - 1);
+        if (err) throw new Error(err.message);
+        if (!data || data.length === 0) break;
+        todos = todos.concat(data);
+        if (data.length < PAGE) break; // última página
+        pagina++;
+      }
+      setRegistros(todos);
+    } catch (e) {
+      setError("Não foi possível carregar os dados do banco: " + e.message);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   }, []);
 
   useEffect(() => {
@@ -261,11 +273,15 @@ export default function FaturasApp() {
       const buffer = await file.arrayBuffer();
       const novosRegistros = parseWorkbook(buffer);
 
-      const { error: upsertError } = await supabase
-        .from("faturas")
-        .upsert(novosRegistros, { onConflict: "fatura" });
-
-      if (upsertError) throw new Error(upsertError.message);
+      // Envia em lotes de 500 para não estourar o limite do Supabase
+      const LOTE = 500;
+      for (let i = 0; i < novosRegistros.length; i += LOTE) {
+        const lote = novosRegistros.slice(i, i + LOTE);
+        const { error: upsertError } = await supabase
+          .from("faturas")
+          .upsert(lote, { onConflict: "fatura" });
+        if (upsertError) throw new Error(upsertError.message);
+      }
 
       await carregarRegistros();
     } catch (e) {
