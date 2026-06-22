@@ -177,6 +177,19 @@ export default function FaturasApp() {
   const [error, setError] = useState(null);
   const [search, setSearch] = useState("");
   const [selectedUC, setSelectedUC] = useState(null);
+
+  // Controle de acesso por senha (válida por sessão)
+  const [autenticado, setAutenticado] = useState(false);
+  const [senhaInput, setSenhaInput] = useState("");
+  const [erroSenha, setErroSenha] = useState(false);
+  const [mostrarPainelAdmin, setMostrarPainelAdmin] = useState(false);
+
+  // Filtro por ano e gerenciamento de períodos
+  const [anoSelecionado, setAnoSelecionado] = useState("todos");
+  const [excluindoPeriodo, setExcluindoPeriodo] = useState(false);
+  const [confirmacaoExclusao, setConfirmacaoExclusao] = useState(null); // { tipo, valor, label }
+
+  const SENHA_ADMIN = "mpma@coea";
   const fileInputRef = useRef(null);
 
   const carregarRegistros = useCallback(async () => {
@@ -195,6 +208,44 @@ export default function FaturasApp() {
 
   useEffect(() => {
     carregarRegistros();
+  }, [carregarRegistros]);
+
+  const handleAutenticar = useCallback(() => {
+    if (senhaInput === SENHA_ADMIN) {
+      setAutenticado(true);
+      setErroSenha(false);
+      setSenhaInput("");
+      setMostrarPainelAdmin(true);
+    } else {
+      setErroSenha(true);
+    }
+  }, [senhaInput]);
+
+  const handleExcluirPeriodo = useCallback(async ({ tipo, valor }) => {
+    setExcluindoPeriodo(true);
+    setError(null);
+    try {
+      let query = supabase.from("faturas").delete();
+      if (tipo === "mes") {
+        // valor = "2025-04-01"
+        query = query.eq("mes_referencia", valor);
+      } else if (tipo === "ano") {
+        // valor = "2025"
+        query = query.gte("mes_referencia", `${valor}-01-01`).lte("mes_referencia", `${valor}-12-31`);
+      } else if (tipo === "uc") {
+        // valor = instalacao
+        query = query.eq("uc", valor);
+      }
+      const { error: delErr } = await query;
+      if (delErr) throw new Error(delErr.message);
+      setConfirmacaoExclusao(null);
+      setSelectedUC(null);
+      await carregarRegistros();
+    } catch (e) {
+      setError("Erro ao excluir: " + e.message);
+    } finally {
+      setExcluindoPeriodo(false);
+    }
   }, [carregarRegistros]);
 
   const handleFile = useCallback(async (file) => {
@@ -231,15 +282,56 @@ export default function FaturasApp() {
     return set;
   }, [registros]);
 
-  const ucList = useMemo(() => {
+  // Anos disponíveis no banco
+  const anosDisponiveis = useMemo(() => {
+    const anos = new Set();
+    registros.forEach((r) => {
+      if (r.mes_referencia) anos.add(r.mes_referencia.slice(0, 4));
+    });
+    return Array.from(anos).sort().reverse();
+  }, [registros]);
+
+  // Meses disponíveis (para exclusão por mês)
+  const mesesDisponiveis = useMemo(() => {
     const map = new Map();
     registros.forEach((r) => {
+      if (r.mes_referencia && !map.has(r.mes_referencia)) {
+        map.set(r.mes_referencia, monthLabel(r.mes_referencia));
+      }
+    });
+    return Array.from(map.entries()).sort((a, b) => b[0].localeCompare(a[0]));
+  }, [registros]);
+
+  // Registros filtrados pelo ano selecionado
+  const registrosFiltrados = useMemo(() => {
+    if (anoSelecionado === "todos") return registros;
+    return registros.filter((r) => (r.mes_referencia || "").startsWith(anoSelecionado));
+  }, [registros, anoSelecionado]);
+
+  // Resumo do ano selecionado
+  const resumoAno = useMemo(() => {
+    const base = anoSelecionado === "todos" ? registros : registrosFiltrados;
+    const totalFaturado = base.reduce((acc, r) => acc + (r.valor_total || 0), 0);
+    const totalConsumo = base.reduce((acc, r) => acc + (r.consumo_total_kwh || 0), 0);
+    const totalCip = base.reduce((acc, r) => acc + (r.cip || 0), 0);
+    const totalICMS = base.reduce((acc, r) => acc + (r.icms_val || 0), 0);
+    const totalCOFINS = base.reduce((acc, r) => acc + (r.cofins_val || 0), 0);
+    const totalPIS = base.reduce((acc, r) => acc + (r.pis_val || 0), 0);
+    const totalGD = base.reduce((acc, r) => acc + Math.abs(r.dev_geracao_total || 0), 0);
+    const meses = new Set(base.map((r) => r.mes_referencia)).size;
+    const ucs = new Set(base.map((r) => r.uc)).size;
+    return { totalFaturado, totalConsumo, totalCip, totalICMS, totalCOFINS, totalPIS, totalGD, meses, ucs };
+  }, [registros, registrosFiltrados, anoSelecionado]);
+
+  const ucList = useMemo(() => {
+    const map = new Map();
+    registrosFiltrados.forEach((r) => {
       if (!map.has(r.uc)) {
         map.set(r.uc, { uc: r.uc, municipio: r.municipio, complemento: r.complemento });
       }
     });
     return Array.from(map.values()).sort((a, b) => (a.municipio || "").localeCompare(b.municipio || ""));
-  }, [registros]);
+  }, [registrosFiltrados]);
 
   const filteredUcList = useMemo(() => {
     if (!search.trim()) return ucList;
@@ -288,7 +380,6 @@ export default function FaturasApp() {
   }, [historicoUC]);
 
   const ultimoRegistro = historicoUC[historicoUC.length - 1];
-  const totalMesesUnicos = useMemo(() => new Set(registros.map((r) => r.mes_referencia)).size, [registros]);
 
   // ── Alertas ──────────────────────────────────────────────────────────────
 
@@ -329,32 +420,233 @@ export default function FaturasApp() {
   return (
     <div style={{ fontFamily: "Inter, system-ui, sans-serif", background: BG, minHeight: "100vh", color: INK }}>
       <div style={{ maxWidth: 1140, margin: "0 auto", padding: "32px 24px 64px" }}>
-        <header style={{ marginBottom: 28 }}>
-          <h1 style={{ fontSize: 24, fontWeight: 700, margin: 0, letterSpacing: "-0.01em" }}>
-            Consulta de faturas <span style={{ color: COPPER_DARK }}>· Energia MPMA</span>
-          </h1>
-          <p style={{ color: MUTED, fontSize: 13.5, marginTop: 6 }}>
-            {ucList.length > 0
-              ? `${ucList.length} unidades consumidoras · ${totalMesesUnicos} ${totalMesesUnicos === 1 ? "mês" : "meses"} de histórico${ucsComGD.size > 0 ? ` · ${ucsComGD.size} com geração distribuída` : ""}`
-              : "Envie a planilha Excel da Equatorial para começar a registrar o histórico."}
-          </p>
+
+        {/* ── Cabeçalho ── */}
+        <header style={{ marginBottom: 20, display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+          <div>
+            <h1 style={{ fontSize: 24, fontWeight: 700, margin: 0, letterSpacing: "-0.01em" }}>
+              Consulta de faturas <span style={{ color: COPPER_DARK }}>· Energia MPMA</span>
+            </h1>
+            <p style={{ color: MUTED, fontSize: 13.5, marginTop: 6 }}>
+              {ucList.length > 0
+                ? `${ucList.length} unidades consumidoras · ${resumoAno.meses} ${resumoAno.meses === 1 ? "mês" : "meses"}${ucsComGD.size > 0 ? ` · ${ucsComGD.size} com geração distribuída` : ""}`
+                : "Nenhum dado carregado. Use o painel de administração para importar planilhas."}
+            </p>
+          </div>
+          <button
+            onClick={() => {
+              if (autenticado) { setMostrarPainelAdmin((v) => !v); }
+              else { setMostrarPainelAdmin(true); }
+            }}
+            style={{
+              padding: "8px 16px", borderRadius: 8, border: `1px solid ${BORDER}`,
+              background: autenticado ? "#FAEEDA" : CARD, cursor: "pointer",
+              fontSize: 13, fontWeight: 600, color: COPPER_DARK, fontFamily: "inherit",
+            }}
+          >
+            {autenticado ? (mostrarPainelAdmin ? "Fechar administração" : "Administração") : "🔒 Administração"}
+          </button>
         </header>
 
-        <section style={{ background: CARD, border: `1px solid ${BORDER}`, borderRadius: 12, padding: "18px 20px", marginBottom: 24 }}>
-          <label style={{ fontSize: 12, color: MUTED, fontWeight: 600, display: "block", marginBottom: 6 }}>
-            Planilha de faturamento (.xlsx) — pode conter um ou vários meses
-          </label>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".xlsx,.xls"
-            disabled={processing}
-            onChange={(e) => handleFile(e.target.files[0])}
-            style={{ fontSize: 13.5 }}
-          />
-          {processing && <p style={{ marginTop: 10, fontSize: 13, color: MUTED }}>Lendo planilha e salvando no banco compartilhado...</p>}
-          {error && <p style={{ marginTop: 12, fontSize: 13, color: "#A32D2D", fontWeight: 600 }}>{error}</p>}
-        </section>
+        {/* ── Painel de administração (upload + exclusão, protegido por senha) ── */}
+        {mostrarPainelAdmin && (
+          <section style={{ background: CARD, border: `1px solid ${BORDER}`, borderRadius: 12, padding: "20px 22px", marginBottom: 24 }}>
+            {!autenticado ? (
+              <div>
+                <p style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 12, color: INK }}>
+                  Digite a senha de administração para carregar ou remover dados:
+                </p>
+                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                  <input
+                    type="password"
+                    placeholder="Senha"
+                    value={senhaInput}
+                    onChange={(e) => { setSenhaInput(e.target.value); setErroSenha(false); }}
+                    onKeyDown={(e) => e.key === "Enter" && handleAutenticar()}
+                    style={{ border: `1px solid ${erroSenha ? "#A32D2D" : BORDER}`, borderRadius: 8, padding: "8px 12px", fontSize: 14, fontFamily: "inherit", width: 220 }}
+                  />
+                  <button
+                    onClick={handleAutenticar}
+                    style={{ padding: "8px 18px", borderRadius: 8, border: "none", background: COPPER, color: "#fff", fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontSize: 13.5 }}
+                  >
+                    Entrar
+                  </button>
+                </div>
+                {erroSenha && <p style={{ color: "#A32D2D", fontSize: 12.5, marginTop: 8 }}>Senha incorreta.</p>}
+              </div>
+            ) : (
+              <div>
+                <div style={{ display: "flex", gap: 32, flexWrap: "wrap" }}>
+                  {/* Upload */}
+                  <div style={{ flex: 1, minWidth: 280 }}>
+                    <p style={{ fontSize: 12, fontWeight: 700, color: MUTED, marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                      Carregar planilha
+                    </p>
+                    <label style={{ fontSize: 13, color: MUTED, display: "block", marginBottom: 6 }}>
+                      Arquivo .xlsx (um ou vários meses)
+                    </label>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".xlsx,.xls"
+                      disabled={processing}
+                      onChange={(e) => handleFile(e.target.files[0])}
+                      style={{ fontSize: 13.5 }}
+                    />
+                    {processing && <p style={{ marginTop: 8, fontSize: 13, color: MUTED }}>Processando planilha...</p>}
+                  </div>
+
+                  {/* Exclusão por mês */}
+                  <div style={{ flex: 1, minWidth: 220 }}>
+                    <p style={{ fontSize: 12, fontWeight: 700, color: MUTED, marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                      Remover mês
+                    </p>
+                    {mesesDisponiveis.length === 0 ? (
+                      <p style={{ fontSize: 13, color: MUTED }}>Nenhum mês disponível.</p>
+                    ) : (
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <select
+                          id="sel-mes"
+                          style={{ border: `1px solid ${BORDER}`, borderRadius: 8, padding: "7px 10px", fontSize: 13.5, fontFamily: "inherit", flex: 1 }}
+                        >
+                          {mesesDisponiveis.map(([val, label]) => (
+                            <option key={val} value={val}>{label}</option>
+                          ))}
+                        </select>
+                        <button
+                          disabled={excluindoPeriodo}
+                          onClick={() => {
+                            const sel = document.getElementById("sel-mes");
+                            setConfirmacaoExclusao({ tipo: "mes", valor: sel.value, label: `mês ${monthLabel(sel.value)}` });
+                          }}
+                          style={{ padding: "7px 14px", borderRadius: 8, border: `1px solid #F5A9A9`, background: "#FDECEA", color: "#A32D2D", fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontSize: 13 }}
+                        >
+                          Remover
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Exclusão por ano */}
+                  <div style={{ flex: 1, minWidth: 220 }}>
+                    <p style={{ fontSize: 12, fontWeight: 700, color: MUTED, marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                      Remover ano completo
+                    </p>
+                    {anosDisponiveis.length === 0 ? (
+                      <p style={{ fontSize: 13, color: MUTED }}>Nenhum ano disponível.</p>
+                    ) : (
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <select
+                          id="sel-ano-del"
+                          style={{ border: `1px solid ${BORDER}`, borderRadius: 8, padding: "7px 10px", fontSize: 13.5, fontFamily: "inherit", flex: 1 }}
+                        >
+                          {anosDisponiveis.map((a) => (
+                            <option key={a} value={a}>{a}</option>
+                          ))}
+                        </select>
+                        <button
+                          disabled={excluindoPeriodo}
+                          onClick={() => {
+                            const sel = document.getElementById("sel-ano-del");
+                            setConfirmacaoExclusao({ tipo: "ano", valor: sel.value, label: `ano ${sel.value} completo` });
+                          }}
+                          style={{ padding: "7px 14px", borderRadius: 8, border: `1px solid #F5A9A9`, background: "#FDECEA", color: "#A32D2D", fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontSize: 13 }}
+                        >
+                          Remover
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Exclusão por UC (visível se uma UC estiver selecionada) */}
+                {selectedUC && (
+                  <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${BORDER}` }}>
+                    <p style={{ fontSize: 12, fontWeight: 700, color: MUTED, marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                      Remover UC selecionada
+                    </p>
+                    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                      <span style={{ fontSize: 13, color: INK }}>
+                        <strong>{ucList.find((u) => u.uc === selectedUC)?.municipio}</strong>
+                        {" — "}UC {selectedUC}
+                      </span>
+                      <button
+                        disabled={excluindoPeriodo}
+                        onClick={() => setConfirmacaoExclusao({ tipo: "uc", valor: selectedUC, label: `UC ${selectedUC} (todos os meses)` })}
+                        style={{ padding: "6px 14px", borderRadius: 8, border: `1px solid #F5A9A9`, background: "#FDECEA", color: "#A32D2D", fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontSize: 13 }}
+                      >
+                        Remover todos os dados desta UC
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {error && <p style={{ marginTop: 12, fontSize: 13, color: "#A32D2D", fontWeight: 600 }}>{error}</p>}
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* ── Modal de confirmação de exclusão ── */}
+        {confirmacaoExclusao && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <div style={{ background: CARD, borderRadius: 14, padding: "28px 32px", maxWidth: 420, width: "90%", boxShadow: "0 8px 32px rgba(0,0,0,0.18)" }}>
+              <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 12, color: "#A32D2D" }}>Confirmar exclusão</h3>
+              <p style={{ fontSize: 14, color: INK, marginBottom: 20, lineHeight: 1.6 }}>
+                Você está prestes a remover permanentemente todos os registros do <strong>{confirmacaoExclusao.label}</strong> do banco de dados. Essa ação não pode ser desfeita.
+              </p>
+              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                <button
+                  onClick={() => setConfirmacaoExclusao(null)}
+                  style={{ padding: "8px 18px", borderRadius: 8, border: `1px solid ${BORDER}`, background: CARD, cursor: "pointer", fontFamily: "inherit", fontSize: 13.5, fontWeight: 600 }}
+                >
+                  Cancelar
+                </button>
+                <button
+                  disabled={excluindoPeriodo}
+                  onClick={() => handleExcluirPeriodo(confirmacaoExclusao)}
+                  style={{ padding: "8px 18px", borderRadius: 8, border: "none", background: "#A32D2D", color: "#fff", fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontSize: 13.5 }}
+                >
+                  {excluindoPeriodo ? "Removendo..." : "Confirmar exclusão"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── Filtro por ano + Resumo ── */}
+        {anosDisponiveis.length > 0 && (
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 14, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 12, fontWeight: 700, color: MUTED, textTransform: "uppercase", letterSpacing: "0.05em" }}>Ano:</span>
+              {["todos", ...anosDisponiveis].map((a) => (
+                <button
+                  key={a}
+                  onClick={() => { setAnoSelecionado(a); setSelectedUC(null); }}
+                  style={{
+                    padding: "5px 14px", borderRadius: 20, border: `1px solid ${anoSelecionado === a ? COPPER : BORDER}`,
+                    background: anoSelecionado === a ? "#FAEEDA" : CARD, color: anoSelecionado === a ? COPPER_DARK : INK,
+                    fontWeight: anoSelecionado === a ? 700 : 400, cursor: "pointer", fontSize: 13.5, fontFamily: "inherit",
+                  }}
+                >
+                  {a === "todos" ? "Todos" : a}
+                </button>
+              ))}
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 4 }}>
+              <Metric label={`Total faturado${anoSelecionado !== "todos" ? ` ${anoSelecionado}` : ""}`} value={fmtCurrency(resumoAno.totalFaturado)} />
+              <Metric label="Consumo total (kWh)" value={fmtNumber(resumoAno.totalConsumo, 0)} />
+              <Metric label="Crédito geração distribuída" value={fmtCurrency(resumoAno.totalGD)} />
+              <Metric label="CIP total" value={fmtCurrency(resumoAno.totalCip)} />
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+              <Metric label="ICMS total" value={fmtCurrency(resumoAno.totalICMS)} />
+              <Metric label="COFINS total" value={fmtCurrency(resumoAno.totalCOFINS)} />
+              <Metric label="PIS total" value={fmtCurrency(resumoAno.totalPIS)} />
+            </div>
+          </div>
+        )}
 
         {loading ? (
           <p style={{ color: MUTED, fontSize: 14 }}>Carregando dados...</p>
