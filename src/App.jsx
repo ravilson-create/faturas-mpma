@@ -290,6 +290,42 @@ export default function FaturasApp() {
   const ultimoRegistro = historicoUC[historicoUC.length - 1];
   const totalMesesUnicos = useMemo(() => new Set(registros.map((r) => r.mes_referencia)).size, [registros]);
 
+  // ── Alertas ──────────────────────────────────────────────────────────────
+
+  // Alerta 1: ultrapassagem de demanda (medida > contratada)
+  const alertasUltrapassagem = useMemo(() => {
+    return historicoUC.filter((r) => {
+      const contratada = r.demanda_contratada_kw || 0;
+      const medida = r.demanda_ativa_kw || r.demanda_ponta_kw || 0;
+      return contratada > 0 && medida > contratada;
+    });
+  }, [historicoUC]);
+
+  // Alerta 2: variação de consumo > 20% vs média dos últimos 6 meses
+  const alertaConsumo = useMemo(() => {
+    if (historicoUC.length < 2) return null;
+    const ultimo = historicoUC[historicoUC.length - 1];
+    const anteriores = historicoUC.slice(-7, -1); // até 6 meses antes do último
+    if (anteriores.length === 0) return null;
+    const media = anteriores.reduce((acc, r) => acc + (r.consumo_total_kwh || 0), 0) / anteriores.length;
+    if (media === 0) return null;
+    const variacao = ((ultimo.consumo_total_kwh || 0) - media) / media;
+    if (Math.abs(variacao) > 0.2) {
+      return { variacao, media, consumoAtual: ultimo.consumo_total_kwh, mes: ultimo.mes_referencia };
+    }
+    return null;
+  }, [historicoUC]);
+
+  // Alerta 3: reativo excedente (qualquer mês com valor > 0)
+  const alertasReativo = useMemo(() => {
+    return historicoUC.filter((r) => {
+      const reativo = (r.val_reativo_excedente || 0) + (r.val_reativo_excedente_fp || 0) + (r.val_reativo_excedente_np || 0);
+      return reativo > 0;
+    });
+  }, [historicoUC]);
+
+  const temAlertas = alertasUltrapassagem.length > 0 || alertaConsumo !== null || alertasReativo.length > 0;
+
   return (
     <div style={{ fontFamily: "Inter, system-ui, sans-serif", background: BG, minHeight: "100vh", color: INK }}>
       <div style={{ maxWidth: 1140, margin: "0 auto", padding: "32px 24px 64px" }}>
@@ -385,14 +421,121 @@ export default function FaturasApp() {
                     </div>
 
                     {isAltaTensao && (
-                      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginTop: 12 }}>
-                        <Metric label="Demanda contratada" value={`${fmtNumber(ultimoRegistro?.demanda_contratada_kw, 0)} kW`} />
-                        <Metric label="Consumo ponta" value={`${fmtNumber(ultimoRegistro?.consumo_ponta_kwh, 0)} kWh`} />
-                        <Metric label="Consumo fora ponta" value={`${fmtNumber(ultimoRegistro?.consumo_fora_ponta_kwh, 0)} kWh`} />
-                        <Metric label="Reativo excedente" value={`${fmtNumber((ultimoRegistro?.reativo_excedente_fp_kwh || 0) + (ultimoRegistro?.reativo_excedente_np_kwh || 0), 0)} kWh`} />
-                      </div>
+                      <>
+                        <div style={{ marginTop: 10, marginBottom: 4, fontSize: 11, fontWeight: 700, color: MUTED, letterSpacing: "0.06em", textTransform: "uppercase" }}>
+                          Demanda
+                        </div>
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+                          <Metric
+                            label="Contratada"
+                            value={`${fmtNumber(ultimoRegistro?.demanda_contratada_kw, 0)} kW`}
+                          />
+                          <Metric
+                            label="Ativa medida"
+                            value={`${fmtNumber(ultimoRegistro?.demanda_ativa_kw || ultimoRegistro?.demanda_contratada_kw, 0)} kW`}
+                            alert={
+                              (ultimoRegistro?.demanda_ativa_kw || 0) > (ultimoRegistro?.demanda_contratada_kw || 0)
+                                ? "red"
+                                : null
+                            }
+                          />
+                          <Metric
+                            label="Ponta"
+                            value={`${fmtNumber(ultimoRegistro?.demanda_ponta_kw || ultimoRegistro?.demanda_ponta_col_kw, 0)} kW`}
+                          />
+                          <Metric
+                            label="Fora ponta"
+                            value={`${fmtNumber(ultimoRegistro?.demanda_fora_ponta_kw || ultimoRegistro?.demanda_fora_ponta_col_kw, 0)} kW`}
+                          />
+                        </div>
+
+                        <div style={{ marginTop: 12, marginBottom: 4, fontSize: 11, fontWeight: 700, color: MUTED, letterSpacing: "0.06em", textTransform: "uppercase" }}>
+                          Consumo
+                        </div>
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+                          <Metric label="Total" value={`${fmtNumber(ultimoRegistro?.consumo_total_kwh, 0)} kWh`} />
+                          <Metric label="Ponta" value={`${fmtNumber(ultimoRegistro?.consumo_ponta_kwh, 0)} kWh`} />
+                          <Metric label="Fora ponta" value={`${fmtNumber(ultimoRegistro?.consumo_fora_ponta_kwh, 0)} kWh`} />
+                          <Metric
+                            label="Reativo excedente"
+                            value={`${fmtNumber((ultimoRegistro?.reativo_excedente_fp_kwh || 0) + (ultimoRegistro?.reativo_excedente_np_kwh || 0), 0)} kWh`}
+                            alert={
+                              ((ultimoRegistro?.val_reativo_excedente || 0) + (ultimoRegistro?.val_reativo_excedente_fp || 0) + (ultimoRegistro?.val_reativo_excedente_np || 0)) > 0
+                                ? "orange"
+                                : null
+                            }
+                          />
+                        </div>
+                      </>
                     )}
                   </div>
+
+                  {temAlertas && (
+                    <div style={{ background: "#FFF8F0", border: "1px solid #F5C58A", borderRadius: 12, padding: "16px 20px", marginBottom: 16 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+                        <span style={{ fontSize: 16 }}>⚠️</span>
+                        <h3 style={{ fontSize: 13, fontWeight: 700, color: "#7A3C00", margin: 0 }}>
+                          Alertas desta unidade
+                        </h3>
+                      </div>
+
+                      {alertasUltrapassagem.length > 0 && (
+                        <div style={{ marginBottom: 12 }}>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: "#A32D2D", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#A32D2D", display: "inline-block" }} />
+                            Ultrapassagem de demanda
+                          </div>
+                          {alertasUltrapassagem.map((r) => {
+                            const contratada = r.demanda_contratada_kw || 0;
+                            const medida = r.demanda_ativa_kw || r.demanda_ponta_kw || 0;
+                            const excesso = medida - contratada;
+                            const pct = contratada > 0 ? ((excesso / contratada) * 100).toFixed(1) : "-";
+                            return (
+                              <div key={r.fatura} style={{ fontSize: 12.5, color: INK, background: "#FDECEA", borderRadius: 6, padding: "6px 10px", marginBottom: 4 }}>
+                                <strong>{monthLabel(r.mes_referencia)}</strong> — medida {fmtNumber(medida, 0)} kW vs contratada {fmtNumber(contratada, 0)} kW
+                                {" "}(<span style={{ color: "#A32D2D", fontWeight: 700 }}>+{pct}%</span>)
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {alertaConsumo && (
+                        <div style={{ marginBottom: 12 }}>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: "#7A3C00", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#E88C00", display: "inline-block" }} />
+                            Variação de consumo acima de 20%
+                          </div>
+                          <div style={{ fontSize: 12.5, color: INK, background: "#FFF3DC", borderRadius: 6, padding: "6px 10px" }}>
+                            <strong>{monthLabel(alertaConsumo.mes)}</strong> — consumo {fmtNumber(alertaConsumo.consumoAtual, 0)} kWh vs média dos 6 meses anteriores {fmtNumber(alertaConsumo.media, 0)} kWh
+                            {" "}(
+                            <span style={{ color: alertaConsumo.variacao > 0 ? "#A32D2D" : "#3B6D11", fontWeight: 700 }}>
+                              {alertaConsumo.variacao > 0 ? "+" : ""}{(alertaConsumo.variacao * 100).toFixed(1)}%
+                            </span>
+                            )
+                          </div>
+                        </div>
+                      )}
+
+                      {alertasReativo.length > 0 && (
+                        <div>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: "#5A4200", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#C47F00", display: "inline-block" }} />
+                            Reativo excedente faturado
+                          </div>
+                          {alertasReativo.map((r) => {
+                            const valReativo = (r.val_reativo_excedente || 0) + (r.val_reativo_excedente_fp || 0) + (r.val_reativo_excedente_np || 0);
+                            const kwhReativo = (r.reativo_excedente_kwh || 0) + (r.reativo_excedente_fp_kwh || 0) + (r.reativo_excedente_np_kwh || 0);
+                            return (
+                              <div key={r.fatura} style={{ fontSize: 12.5, color: INK, background: "#FFF8DC", borderRadius: 6, padding: "6px 10px", marginBottom: 4 }}>
+                                <strong>{monthLabel(r.mes_referencia)}</strong> — {fmtNumber(kwhReativo, 0)} kVAr excedente · custo {fmtCurrency(valReativo)}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {temGeracaoDistribuida && (
                     <div style={{ background: CARD, border: `1px solid ${BORDER}`, borderRadius: 12, padding: "16px 20px", marginBottom: 16 }}>
@@ -470,22 +613,33 @@ export default function FaturasApp() {
                           </tr>
                         </thead>
                         <tbody>
-                          {historicoUC.map((r) => (
-                            <tr key={r.fatura} style={{ borderBottom: `1px solid ${BORDER}` }}>
-                              <td style={{ padding: "8px 8px", fontWeight: 600 }}>{monthLabel(r.mes_referencia)}</td>
-                              <td style={{ padding: "8px 8px", textAlign: "right" }}>
-                                {isAltaTensao ? fmtNumber(r.consumo_total_kwh, 0) : fmtNumber(r.kwh, 0)}
-                              </td>
-                              <td style={{ padding: "8px 8px", textAlign: "right" }}>
-                                {isAltaTensao ? fmtNumber(r.demanda_contratada_kw, 0) : fmtCurrency(r.val_consumo)}
-                              </td>
-                              <td style={{ padding: "8px 8px", textAlign: "right" }}>{fmtCurrency(r.icms_val)}</td>
-                              <td style={{ padding: "8px 8px", textAlign: "right" }}>{fmtCurrency(r.cofins_val)}</td>
-                              <td style={{ padding: "8px 8px", textAlign: "right" }}>{fmtCurrency(r.pis_val)}</td>
-                              <td style={{ padding: "8px 8px", textAlign: "right" }}>{fmtCurrency(r.cip)}</td>
-                              <td style={{ padding: "8px 8px", textAlign: "right", fontWeight: 700, color: COPPER_DARK }}>{fmtCurrency(r.valor_total)}</td>
-                            </tr>
-                          ))}
+                          {historicoUC.map((r) => {
+                            const temUltrapassagem = alertasUltrapassagem.some((a) => a.fatura === r.fatura);
+                            const temReativo = alertasReativo.some((a) => a.fatura === r.fatura);
+                            const ehMesAlertaConsumo = alertaConsumo?.mes === r.mes_referencia;
+                            const rowAlert = temUltrapassagem ? "#FDECEA" : temReativo ? "#FFF8DC" : ehMesAlertaConsumo ? "#FFF3DC" : null;
+                            return (
+                              <tr key={r.fatura} style={{ borderBottom: `1px solid ${BORDER}`, background: rowAlert || "transparent" }}>
+                                <td style={{ padding: "8px 8px", fontWeight: 600 }}>
+                                  {monthLabel(r.mes_referencia)}
+                                  {temUltrapassagem && <span title="Ultrapassagem de demanda" style={{ marginLeft: 5 }}>🔴</span>}
+                                  {temReativo && <span title="Reativo excedente" style={{ marginLeft: 5 }}>🟠</span>}
+                                  {ehMesAlertaConsumo && <span title="Variação de consumo > 20%" style={{ marginLeft: 5 }}>🟡</span>}
+                                </td>
+                                <td style={{ padding: "8px 8px", textAlign: "right" }}>
+                                  {isAltaTensao ? fmtNumber(r.consumo_total_kwh, 0) : fmtNumber(r.kwh, 0)}
+                                </td>
+                                <td style={{ padding: "8px 8px", textAlign: "right" }}>
+                                  {isAltaTensao ? fmtNumber(r.demanda_contratada_kw, 0) : fmtCurrency(r.val_consumo)}
+                                </td>
+                                <td style={{ padding: "8px 8px", textAlign: "right" }}>{fmtCurrency(r.icms_val)}</td>
+                                <td style={{ padding: "8px 8px", textAlign: "right" }}>{fmtCurrency(r.cofins_val)}</td>
+                                <td style={{ padding: "8px 8px", textAlign: "right" }}>{fmtCurrency(r.pis_val)}</td>
+                                <td style={{ padding: "8px 8px", textAlign: "right" }}>{fmtCurrency(r.cip)}</td>
+                                <td style={{ padding: "8px 8px", textAlign: "right", fontWeight: 700, color: COPPER_DARK }}>{fmtCurrency(r.valor_total)}</td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
@@ -504,9 +658,13 @@ export default function FaturasApp() {
   );
 }
 
-function Metric({ label, value }) {
+function Metric({ label, value, alert }) {
+  const bgMap = { red: "#FDECEA", orange: "#FFF3DC", yellow: "#FFFBDC" };
+  const borderMap = { red: "1px solid #F5A9A9", orange: "1px solid #F5C58A", yellow: "1px solid #F5E58A" };
+  const bg = alert ? bgMap[alert] : BG;
+  const border = alert ? borderMap[alert] : "none";
   return (
-    <div style={{ background: BG, borderRadius: 8, padding: "10px 12px" }}>
+    <div style={{ background: bg, borderRadius: 8, padding: "10px 12px", border }}>
       <div style={{ fontSize: 11, color: MUTED, fontWeight: 600, marginBottom: 3 }}>{label}</div>
       <div style={{ fontSize: 17, fontWeight: 700 }}>{value}</div>
     </div>
