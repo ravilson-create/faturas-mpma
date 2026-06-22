@@ -186,6 +186,9 @@ export default function FaturasApp() {
 
   // Filtro por ano e gerenciamento de períodos
   const [anoSelecionado, setAnoSelecionado] = useState("todos");
+  const [periodoInicio, setPeriodoInicio] = useState("");
+  const [periodoFim, setPeriodoFim] = useState("");
+  const [usarFiltroPeriodo, setUsarFiltroPeriodo] = useState(false);
   const [excluindoPeriodo, setExcluindoPeriodo] = useState(false);
   const [confirmacaoExclusao, setConfirmacaoExclusao] = useState(null); // { tipo, valor, label }
 
@@ -318,11 +321,28 @@ export default function FaturasApp() {
     return Array.from(map.entries()).sort((a, b) => b[0].localeCompare(a[0]));
   }, [registros]);
 
-  // Registros filtrados pelo ano selecionado
+  // Converte MM/AAAA -> AAAA-MM-01 para comparação
+  function mesParaISO(mmaaaa) {
+    if (!mmaaaa || !/^\d{2}\/\d{4}$/.test(mmaaaa)) return null;
+    const [mm, yyyy] = mmaaaa.split("/");
+    return `${yyyy}-${mm}-01`;
+  }
+
   const registrosFiltrados = useMemo(() => {
+    if (usarFiltroPeriodo) {
+      const inicio = mesParaISO(periodoInicio);
+      const fim = mesParaISO(periodoFim);
+      return registros.filter((r) => {
+        const ref = r.mes_referencia;
+        if (!ref) return false;
+        if (inicio && ref < inicio) return false;
+        if (fim && ref > fim) return false;
+        return true;
+      });
+    }
     if (anoSelecionado === "todos") return registros;
     return registros.filter((r) => (r.mes_referencia || "").startsWith(anoSelecionado));
-  }, [registros, anoSelecionado]);
+  }, [registros, anoSelecionado, usarFiltroPeriodo, periodoInicio, periodoFim]);
 
   // Resumo do ano selecionado
   const resumoAno = useMemo(() => {
@@ -417,7 +437,8 @@ export default function FaturasApp() {
     const media = anteriores.reduce((acc, r) => acc + (r.consumo_total_kwh || 0), 0) / anteriores.length;
     if (media === 0) return null;
     const variacao = ((ultimo.consumo_total_kwh || 0) - media) / media;
-    if (Math.abs(variacao) > 0.2) {
+    // Alerta somente quando houver AUMENTO acima de 20%
+    if (variacao > 0.2) {
       return { variacao, media, consumoAtual: ultimo.consumo_total_kwh, mes: ultimo.mes_referencia };
     }
     return null;
@@ -431,7 +452,29 @@ export default function FaturasApp() {
     });
   }, [historicoUC]);
 
-  const temAlertas = alertasUltrapassagem.length > 0 || alertaConsumo !== null || alertasReativo.length > 0;
+  // Alerta 4: aumento da CIP vs mês anterior
+  const alertasCIP = useMemo(() => {
+    const alertas = [];
+    for (let i = 1; i < historicoUC.length; i++) {
+      const atual = historicoUC[i];
+      const anterior = historicoUC[i - 1];
+      const cipAtual = atual.cip || 0;
+      const cipAnterior = anterior.cip || 0;
+      if (cipAnterior > 0 && cipAtual > cipAnterior) {
+        alertas.push({
+          fatura: atual.fatura,
+          mes: atual.mes_referencia,
+          cipAtual,
+          cipAnterior,
+          aumento: cipAtual - cipAnterior,
+          pct: ((cipAtual - cipAnterior) / cipAnterior) * 100,
+        });
+      }
+    }
+    return alertas;
+  }, [historicoUC]);
+
+  const temAlertas = alertasUltrapassagem.length > 0 || alertaConsumo !== null || alertasReativo.length > 0 || alertasCIP.length > 0;
 
   return (
     <div style={{ fontFamily: "Inter, system-ui, sans-serif", background: BG, minHeight: "100vh", color: INK }}>
@@ -439,15 +482,23 @@ export default function FaturasApp() {
 
         {/* ── Cabeçalho ── */}
         <header style={{ marginBottom: 20, display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
-          <div>
-            <h1 style={{ fontSize: 24, fontWeight: 700, margin: 0, letterSpacing: "-0.01em" }}>
-              Consulta de faturas <span style={{ color: COPPER_DARK }}>· Energia MPMA</span>
-            </h1>
-            <p style={{ color: MUTED, fontSize: 13.5, marginTop: 6 }}>
-              {ucList.length > 0
-                ? `${ucList.length} unidades consumidoras · ${resumoAno.meses} ${resumoAno.meses === 1 ? "mês" : "meses"}${ucsComGD.size > 0 ? ` · ${ucsComGD.size} com geração distribuída` : ""}`
-                : "Nenhum dado carregado. Use o painel de administração para importar planilhas."}
-            </p>
+          <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+            <img
+              src="https://www.mpma.mp.br/wp-content/uploads/2022/09/mpma-hs.png"
+              alt="MPMA"
+              style={{ height: 52, objectFit: "contain" }}
+              onError={(e) => { e.target.style.display = "none"; }}
+            />
+            <div>
+              <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0, letterSpacing: "-0.01em" }}>
+                Consulta de faturas <span style={{ color: COPPER_DARK }}>· Energia MPMA</span>
+              </h1>
+              <p style={{ color: MUTED, fontSize: 13, marginTop: 4 }}>
+                {ucList.length > 0
+                  ? `${ucList.length} unidades consumidoras · ${resumoAno.meses} ${resumoAno.meses === 1 ? "mês" : "meses"}${ucsComGD.size > 0 ? ` · ${ucsComGD.size} com geração distribuída` : ""}`
+                  : "Nenhum dado carregado. Use o painel de administração para importar planilhas."}
+              </p>
+            </div>
           </div>
           <button
             onClick={() => {
@@ -630,19 +681,23 @@ export default function FaturasApp() {
           </div>
         )}
 
-        {/* ── Filtro por ano + Resumo ── */}
+        {/* ── Filtro por ano / período + Resumo ── */}
         {anosDisponiveis.length > 0 && (
           <div style={{ marginBottom: 20 }}>
-            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 14, flexWrap: "wrap" }}>
+            {/* Botões de ano */}
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
               <span style={{ fontSize: 12, fontWeight: 700, color: MUTED, textTransform: "uppercase", letterSpacing: "0.05em" }}>Ano:</span>
               {["todos", ...anosDisponiveis].map((a) => (
                 <button
                   key={a}
-                  onClick={() => { setAnoSelecionado(a); setSelectedUC(null); }}
+                  onClick={() => { setAnoSelecionado(a); setUsarFiltroPeriodo(false); setSelectedUC(null); }}
                   style={{
-                    padding: "5px 14px", borderRadius: 20, border: `1px solid ${anoSelecionado === a ? COPPER : BORDER}`,
-                    background: anoSelecionado === a ? "#FAEEDA" : CARD, color: anoSelecionado === a ? COPPER_DARK : INK,
-                    fontWeight: anoSelecionado === a ? 700 : 400, cursor: "pointer", fontSize: 13.5, fontFamily: "inherit",
+                    padding: "5px 14px", borderRadius: 20,
+                    border: `1px solid ${!usarFiltroPeriodo && anoSelecionado === a ? COPPER : BORDER}`,
+                    background: !usarFiltroPeriodo && anoSelecionado === a ? "#FAEEDA" : CARD,
+                    color: !usarFiltroPeriodo && anoSelecionado === a ? COPPER_DARK : INK,
+                    fontWeight: !usarFiltroPeriodo && anoSelecionado === a ? 700 : 400,
+                    cursor: "pointer", fontSize: 13.5, fontFamily: "inherit",
                   }}
                 >
                   {a === "todos" ? "Todos" : a}
@@ -650,16 +705,54 @@ export default function FaturasApp() {
               ))}
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 4 }}>
-              <Metric label={`Total faturado${anoSelecionado !== "todos" ? ` ${anoSelecionado}` : ""}`} value={fmtCurrency(resumoAno.totalFaturado)} />
+            {/* Filtro por período */}
+            <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 14, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 12, fontWeight: 700, color: MUTED, textTransform: "uppercase", letterSpacing: "0.05em" }}>Período:</span>
+              <input
+                type="text"
+                placeholder="De MM/AAAA"
+                value={periodoInicio}
+                onChange={(e) => setPeriodoInicio(e.target.value)}
+                style={{ border: `1px solid ${BORDER}`, borderRadius: 8, padding: "5px 10px", fontSize: 13.5, width: 120, fontFamily: "inherit" }}
+              />
+              <span style={{ color: MUTED, fontSize: 13 }}>até</span>
+              <input
+                type="text"
+                placeholder="MM/AAAA"
+                value={periodoFim}
+                onChange={(e) => setPeriodoFim(e.target.value)}
+                style={{ border: `1px solid ${BORDER}`, borderRadius: 8, padding: "5px 10px", fontSize: 13.5, width: 120, fontFamily: "inherit" }}
+              />
+              <button
+                onClick={() => {
+                  if (periodoInicio || periodoFim) { setUsarFiltroPeriodo(true); setSelectedUC(null); }
+                }}
+                style={{ padding: "5px 14px", borderRadius: 8, border: `1px solid ${usarFiltroPeriodo ? COPPER : BORDER}`, background: usarFiltroPeriodo ? "#FAEEDA" : CARD, color: usarFiltroPeriodo ? COPPER_DARK : INK, fontWeight: 600, cursor: "pointer", fontSize: 13, fontFamily: "inherit" }}
+              >
+                Filtrar
+              </button>
+              {usarFiltroPeriodo && (
+                <button
+                  onClick={() => { setUsarFiltroPeriodo(false); setPeriodoInicio(""); setPeriodoFim(""); }}
+                  style={{ padding: "5px 12px", borderRadius: 8, border: `1px solid ${BORDER}`, background: CARD, color: MUTED, cursor: "pointer", fontSize: 13, fontFamily: "inherit" }}
+                >
+                  Limpar
+                </button>
+              )}
+            </div>
+
+            {/* Resumo — 4 + 4 métricas simétricas */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 12 }}>
+              <Metric label={`Total faturado${anoSelecionado !== "todos" && !usarFiltroPeriodo ? ` ${anoSelecionado}` : ""}`} value={fmtCurrency(resumoAno.totalFaturado)} />
               <Metric label="Consumo total (kWh)" value={fmtNumber(resumoAno.totalConsumo, 0)} />
               <Metric label="Crédito geração distribuída" value={fmtCurrency(resumoAno.totalGD)} />
               <Metric label="CIP total" value={fmtCurrency(resumoAno.totalCip)} />
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
               <Metric label="ICMS total" value={fmtCurrency(resumoAno.totalICMS)} />
               <Metric label="COFINS total" value={fmtCurrency(resumoAno.totalCOFINS)} />
               <Metric label="PIS total" value={fmtCurrency(resumoAno.totalPIS)} />
+              <Metric label="Unidades no período" value={resumoAno.ucs} />
             </div>
           </div>
         )}
@@ -842,6 +935,21 @@ export default function FaturasApp() {
                           })}
                         </div>
                       )}
+
+                      {alertasCIP.length > 0 && (
+                        <div style={{ marginTop: alertasReativo.length > 0 ? 12 : 0 }}>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: "#185FA5", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#185FA5", display: "inline-block" }} />
+                            Aumento da CIP (Contribuição de Iluminação Pública)
+                          </div>
+                          {alertasCIP.map((a) => (
+                            <div key={a.fatura} style={{ fontSize: 12.5, color: INK, background: "#EAF2FB", borderRadius: 6, padding: "6px 10px", marginBottom: 4 }}>
+                              <strong>{monthLabel(a.mes)}</strong> — CIP {fmtCurrency(a.cipAtual)} vs {fmtCurrency(a.cipAnterior)} no mês anterior
+                              {" "}(<span style={{ color: "#185FA5", fontWeight: 700 }}>+{fmtCurrency(a.aumento)} · +{a.pct.toFixed(1)}%</span>)
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -925,7 +1033,8 @@ export default function FaturasApp() {
                             const temUltrapassagem = alertasUltrapassagem.some((a) => a.fatura === r.fatura);
                             const temReativo = alertasReativo.some((a) => a.fatura === r.fatura);
                             const ehMesAlertaConsumo = alertaConsumo?.mes === r.mes_referencia;
-                            const rowAlert = temUltrapassagem ? "#FDECEA" : temReativo ? "#FFF8DC" : ehMesAlertaConsumo ? "#FFF3DC" : null;
+                            const temCIP = alertasCIP.some((a) => a.fatura === r.fatura);
+                            const rowAlert = temUltrapassagem ? "#FDECEA" : temReativo ? "#FFF8DC" : ehMesAlertaConsumo ? "#FFF3DC" : temCIP ? "#EAF2FB" : null;
                             return (
                               <tr key={r.fatura} style={{ borderBottom: `1px solid ${BORDER}`, background: rowAlert || "transparent" }}>
                                 <td style={{ padding: "8px 8px", fontWeight: 600 }}>
@@ -933,6 +1042,7 @@ export default function FaturasApp() {
                                   {temUltrapassagem && <span title="Ultrapassagem de demanda" style={{ marginLeft: 5 }}>🔴</span>}
                                   {temReativo && <span title="Reativo excedente" style={{ marginLeft: 5 }}>🟠</span>}
                                   {ehMesAlertaConsumo && <span title="Variação de consumo > 20%" style={{ marginLeft: 5 }}>🟡</span>}
+                                  {temCIP && <span title="Aumento de CIP" style={{ marginLeft: 5 }}>🔵</span>}
                                 </td>
                                 <td style={{ padding: "8px 8px", textAlign: "right" }}>
                                   {isAltaTensao ? fmtNumber(r.consumo_total_kwh, 0) : fmtNumber(r.kwh, 0)}
@@ -987,3 +1097,4 @@ function LegendDot({ color, label, dashed }) {
     </span>
   );
 }
+
