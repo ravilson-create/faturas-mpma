@@ -381,10 +381,10 @@ export default function FaturasApp() {
 
   const historicoUC = useMemo(() => {
     if (!selectedUC) return [];
-    return registros
+    return registrosFiltrados
       .filter((r) => r.uc === selectedUC)
       .sort((a, b) => new Date(a.mes_referencia) - new Date(b.mes_referencia));
-  }, [registros, selectedUC]);
+  }, [registrosFiltrados, selectedUC]);
 
   const isAltaTensao = useMemo(() => {
     return historicoUC.some((r) => (r.categoria || "").toUpperCase().includes("ALTA"));
@@ -443,13 +443,70 @@ export default function FaturasApp() {
     return null;
   }, [historicoUC]);
 
-  // Alerta 3: reativo excedente (qualquer mês com valor > 0)
+  // Alerta 3: reativo excedente + análise de capacitores (NBR 5410 / ANEEL)
   const alertasReativo = useMemo(() => {
     return historicoUC.filter((r) => {
       const reativo = (r.val_reativo_excedente || 0) + (r.val_reativo_excedente_fp || 0) + (r.val_reativo_excedente_np || 0);
       return reativo > 0;
     });
   }, [historicoUC]);
+
+  const recomendacaoCapacitor = useMemo(() => {
+    // Só calcula se houve mais de 4 ocorrências no ano calendário do último mês com reativo
+    if (alertasReativo.length <= 4) return null;
+
+    // Usa o mês com maior kVAr excedente como referência para o dimensionamento
+    const pior = alertasReativo.reduce((max, r) => {
+      const kvar = (r.reativo_excedente_kwh || 0) + (r.reativo_excedente_fp_kwh || 0) + (r.reativo_excedente_np_kwh || 0);
+      const kvarMax = (max.reativo_excedente_kwh || 0) + (max.reativo_excedente_fp_kwh || 0) + (max.reativo_excedente_np_kwh || 0);
+      return kvar > kvarMax ? r : max;
+    }, alertasReativo[0]);
+
+    const kW = pior.demanda_ativa_kw || pior.kwh || 0;
+    const kVArExcedente = (pior.reativo_excedente_kwh || 0) + (pior.reativo_excedente_fp_kwh || 0) + (pior.reativo_excedente_np_kwh || 0);
+
+    if (kW === 0 || kVArExcedente === 0) return null;
+
+    // Limite ANEEL: FP mínimo = 0,92 indutivo
+    // kVAr permitido = kW × tan(arccos(0,92))
+    const FP_LIMITE = 0.92;
+    const FP_ALVO = 0.95; // margem de segurança acima do mínimo legal
+    const TENSAO_V = 13800; // média tensão 13,8 kV
+    const FREQ_HZ = 60;
+
+    const tanLimite = Math.tan(Math.acos(FP_LIMITE)); // ≈ 0.3936
+    const tanAlvo = Math.tan(Math.acos(FP_ALVO));     // ≈ 0.3287
+    const kVArPermitido = kW * tanLimite;
+    const kVArTotal = kVArExcedente + kVArPermitido;
+    const kVA = Math.sqrt(kW * kW + kVArTotal * kVArTotal);
+    const fpAtual = kW / kVA;
+
+    // Potência reativa necessária para corrigir de fpAtual para FP_ALVO
+    const tanAtual = Math.tan(Math.acos(fpAtual));
+    const Qc_kVAr = kW * (tanAtual - tanAlvo);
+
+    // Capacitância por fase — banco trifásico em triângulo (ligação Δ), 13,8 kV
+    // Q_total = 3 × V² × 2πfC  →  C = Q_total / (3 × 2πf × V²)
+    const Qc_VAr = Qc_kVAr * 1000;
+    const C_F = Qc_VAr / (3 * 2 * Math.PI * FREQ_HZ * TENSAO_V * TENSAO_V);
+    const C_uF = C_F * 1e6;
+
+    // Padronização para banco comercial (kVAr arredondado para múltiplo de 5 acima)
+    const Qc_padronizado = Math.ceil(Qc_kVAr / 5) * 5;
+
+    return {
+      kW: kW.toFixed(1),
+      kVArExcedente: kVArExcedente.toFixed(1),
+      kVArTotal: kVArTotal.toFixed(1),
+      fpAtual: fpAtual.toFixed(3),
+      Qc_kVAr: Qc_kVAr.toFixed(1),
+      Qc_padronizado,
+      C_uF: C_uF.toFixed(4),
+      tensao: TENSAO_V,
+      mesPior: pior.mes_referencia,
+      ocorrencias: alertasReativo.length,
+    };
+  }, [alertasReativo]);
 
   // Alerta 4: aumento da CIP vs mês anterior
   const alertasCIP = useMemo(() => {
@@ -921,17 +978,86 @@ export default function FaturasApp() {
                         <div>
                           <div style={{ fontSize: 12, fontWeight: 700, color: "#5A4200", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
                             <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#C47F00", display: "inline-block" }} />
-                            Reativo excedente faturado
+                            Reativo excedente faturado ({alertasReativo.length} {alertasReativo.length === 1 ? "ocorrência" : "ocorrências"})
                           </div>
                           {alertasReativo.map((r) => {
                             const valReativo = (r.val_reativo_excedente || 0) + (r.val_reativo_excedente_fp || 0) + (r.val_reativo_excedente_np || 0);
-                            const kwhReativo = (r.reativo_excedente_kwh || 0) + (r.reativo_excedente_fp_kwh || 0) + (r.reativo_excedente_np_kwh || 0);
+                            const kvarReativo = (r.reativo_excedente_kwh || 0) + (r.reativo_excedente_fp_kwh || 0) + (r.reativo_excedente_np_kwh || 0);
                             return (
                               <div key={r.fatura} style={{ fontSize: 12.5, color: INK, background: "#FFF8DC", borderRadius: 6, padding: "6px 10px", marginBottom: 4 }}>
-                                <strong>{monthLabel(r.mes_referencia)}</strong> — {fmtNumber(kwhReativo, 0)} kVAr excedente · custo {fmtCurrency(valReativo)}
+                                <strong>{monthLabel(r.mes_referencia)}</strong> — {fmtNumber(kvarReativo, 1)} kVAr excedente · custo {fmtCurrency(valReativo)}
                               </div>
                             );
                           })}
+
+                          {recomendacaoCapacitor && (
+                            <div style={{ marginTop: 12, background: "#F0F7FF", border: "1px solid #AED6F1", borderRadius: 8, padding: "14px 16px" }}>
+                              <div style={{ fontSize: 12, fontWeight: 700, color: "#1A5276", marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
+                                ⚡ Recomendação técnica — Instalação de banco de capacitores
+                              </div>
+                              <p style={{ fontSize: 12.5, color: INK, margin: "0 0 10px", lineHeight: 1.6 }}>
+                                Esta unidade registrou <strong>{recomendacaoCapacitor.ocorrencias} meses</strong> com reativo excedente
+                                faturado no período analisado, superando o limite de 4 ocorrências que justifica a instalação de
+                                correção de fator de potência conforme a <strong>NBR 5410</strong> e resolução normativa <strong>ANEEL nº 1.000/2021</strong>
+                                (FP mínimo: 0,92 indutivo).
+                              </p>
+
+                              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginBottom: 12 }}>
+                                <div style={{ background: CARD, borderRadius: 6, padding: "8px 10px" }}>
+                                  <div style={{ fontSize: 10, color: MUTED, fontWeight: 700, marginBottom: 2 }}>FP ATUAL (pior mês)</div>
+                                  <div style={{ fontSize: 16, fontWeight: 700, color: "#A32D2D" }}>{recomendacaoCapacitor.fpAtual}</div>
+                                  <div style={{ fontSize: 10, color: MUTED }}>referência: {monthLabel(recomendacaoCapacitor.mesPior)}</div>
+                                </div>
+                                <div style={{ background: CARD, borderRadius: 6, padding: "8px 10px" }}>
+                                  <div style={{ fontSize: 10, color: MUTED, fontWeight: 700, marginBottom: 2 }}>CARGA ATIVA</div>
+                                  <div style={{ fontSize: 16, fontWeight: 700 }}>{recomendacaoCapacitor.kW} kW</div>
+                                </div>
+                                <div style={{ background: CARD, borderRadius: 6, padding: "8px 10px" }}>
+                                  <div style={{ fontSize: 10, color: MUTED, fontWeight: 700, marginBottom: 2 }}>REATIVO TOTAL ESTIMADO</div>
+                                  <div style={{ fontSize: 16, fontWeight: 700 }}>{recomendacaoCapacitor.kVArTotal} kVAr</div>
+                                </div>
+                              </div>
+
+                              <div style={{ background: "#1A5276", borderRadius: 8, padding: "12px 14px", color: "#fff" }}>
+                                <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8, letterSpacing: "0.04em" }}>
+                                  BANCO DE CAPACITORES RECOMENDADO
+                                </div>
+                                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+                                  <div>
+                                    <div style={{ fontSize: 10, opacity: 0.75, marginBottom: 2 }}>Potência reativa calculada</div>
+                                    <div style={{ fontSize: 15, fontWeight: 700 }}>{recomendacaoCapacitor.Qc_kVAr} kVAr</div>
+                                  </div>
+                                  <div>
+                                    <div style={{ fontSize: 10, opacity: 0.75, marginBottom: 2 }}>Potência padronizada (comercial)</div>
+                                    <div style={{ fontSize: 15, fontWeight: 700 }}>{recomendacaoCapacitor.Qc_padronizado} kVAr</div>
+                                  </div>
+                                  <div>
+                                    <div style={{ fontSize: 10, opacity: 0.75, marginBottom: 2 }}>Tensão nominal</div>
+                                    <div style={{ fontSize: 15, fontWeight: 700 }}>13,8 kV</div>
+                                  </div>
+                                </div>
+                                <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid rgba(255,255,255,0.2)" }}>
+                                  <div style={{ fontSize: 10, opacity: 0.75, marginBottom: 4 }}>
+                                    Capacitância por fase — banco trifásico em triângulo (Δ), 60 Hz
+                                  </div>
+                                  <div style={{ fontSize: 14, fontWeight: 700 }}>
+                                    C = {recomendacaoCapacitor.C_uF} µF / fase
+                                  </div>
+                                  <div style={{ fontSize: 10, opacity: 0.65, marginTop: 6 }}>
+                                    Fórmula: C = Q / (3 × 2πf × V²) · Alvo de correção: FP ≥ 0,95
+                                    · Base: ANEEL Res. 1.000/2021 + NBR 5410
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          {alertasReativo.length > 0 && alertasReativo.length <= 4 && (
+                            <p style={{ fontSize: 12, color: "#5A4200", marginTop: 8, marginBottom: 0 }}>
+                              Atenção: {alertasReativo.length} {alertasReativo.length === 1 ? "ocorrência" : "ocorrências"} de reativo excedente no período.
+                              A recomendação de instalação de banco de capacitores é emitida a partir de 5 ocorrências.
+                            </p>
+                          )}
                         </div>
                       )}
 
@@ -1096,4 +1222,3 @@ function LegendDot({ color, label, dashed }) {
     </span>
   );
 }
-
