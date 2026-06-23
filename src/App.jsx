@@ -322,16 +322,15 @@ export default function FaturasApp() {
   }, [registros]);
 
   // Converte MM/AAAA -> AAAA-MM-01 para comparação
-  function mesParaISO(mmaaaa) {
-    if (!mmaaaa || !/^\d{2}\/\d{4}$/.test(mmaaaa)) return null;
-    const [mm, yyyy] = mmaaaa.split("/");
-    return `${yyyy}-${mm}-01`;
-  }
-
   const registrosFiltrados = useMemo(() => {
     if (usarFiltroPeriodo) {
-      const inicio = mesParaISO(periodoInicio);
-      const fim = mesParaISO(periodoFim);
+      const toISO = (mmaaaa) => {
+        if (!mmaaaa || !/^\d{2}\/\d{4}$/.test(mmaaaa.trim())) return null;
+        const [mm, yyyy] = mmaaaa.trim().split("/");
+        return `${yyyy}-${mm.padStart(2,"0")}-01`;
+      };
+      const inicio = toISO(periodoInicio);
+      const fim = toISO(periodoFim);
       return registros.filter((r) => {
         const ref = r.mes_referencia;
         if (!ref) return false;
@@ -344,9 +343,9 @@ export default function FaturasApp() {
     return registros.filter((r) => (r.mes_referencia || "").startsWith(anoSelecionado));
   }, [registros, anoSelecionado, usarFiltroPeriodo, periodoInicio, periodoFim]);
 
-  // Resumo do ano selecionado
+  // Resumo do período/ano selecionado — sempre baseado em registrosFiltrados
   const resumoAno = useMemo(() => {
-    const base = anoSelecionado === "todos" ? registros : registrosFiltrados;
+    const base = registrosFiltrados;
     const totalFaturado = base.reduce((acc, r) => acc + (r.valor_total || 0), 0);
     const totalConsumo = base.reduce((acc, r) => acc + (r.consumo_total_kwh || 0), 0);
     const totalCip = base.reduce((acc, r) => acc + (r.cip || 0), 0);
@@ -357,7 +356,7 @@ export default function FaturasApp() {
     const meses = new Set(base.map((r) => r.mes_referencia)).size;
     const ucs = new Set(base.map((r) => r.uc)).size;
     return { totalFaturado, totalConsumo, totalCip, totalICMS, totalCOFINS, totalPIS, totalGD, meses, ucs };
-  }, [registros, registrosFiltrados, anoSelecionado]);
+  }, [registrosFiltrados]);
 
   const ucList = useMemo(() => {
     const map = new Map();
