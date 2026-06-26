@@ -81,10 +81,16 @@ const ITEM_MAP = {
   "Consumo Reativo Excedente NP": { consumo: "reativo_excedente_np_kwh", valor: "val_reativo_excedente_np" },
   "Adicional Bandeira": { consumo: null, valor: "val_bandeira" },
   "Cip-Ilum Pub Pref Munic": { consumo: null, valor: "cip" },
-  "Tributo a Reter IRPJ": { consumo: null, valor: "irpj" },
-  "Tributo a Reter CSLL": { consumo: null, valor: "csll" },
-  "Tributo a Reter PIS": { consumo: null, valor: "pis_retido" },
-  "Tributo a Reter COFINS": { consumo: null, valor: "cofins_retido" },
+  "Tributo a Reter IRPJ": { consumo: null, valor: "irpj", abs: true },
+  "Tributo a Reter CSLL": { consumo: null, valor: "csll", abs: true },
+  "Tributo a Reter PIS": { consumo: null, valor: "pis_retido", abs: true },
+  "Tributo a Reter COFINS": { consumo: null, valor: "cofins_retido", abs: true },
+  // Itens do novo formato (jan/2023–mai/2026)
+  "Crédito Nível de Tensão": { consumo: null, valor: "credito_nivel_tensao" },
+  "Estorno Crédito DIC/FIC": { consumo: null, valor: "estorno_credito_dic_fic" },
+  "Correção Monetária CNR": { consumo: null, valor: "correcao_monetaria_cnr" },
+  "Dev.Pagto.Indevido Fat.Anter.": { consumo: null, valor: "dev_pagto_indevido" },
+  "Religação urgência/programada": { consumo: null, valor: "religacao_urgencia" },
   "Dev Geração": { consumo: null, valor: "dev_geracao" },
   "Dev Geração NP": { consumo: null, valor: "dev_geracao_np" },
   "Dev Geração FP": { consumo: null, valor: "dev_geracao_fp" },
@@ -150,7 +156,9 @@ function parseWorkbook(arrayBuffer) {
         reg[mapping.consumo] = (reg[mapping.consumo] || 0) + (Number(consumoCell) || 0);
       }
       if (mapping.valor) {
-        reg[mapping.valor] = (reg[mapping.valor] || 0) + valorCell;
+        // Tributos retidos vêm com sinal negativo no arquivo — armazenar como positivo
+        const v = mapping.abs ? Math.abs(valorCell) : valorCell;
+        reg[mapping.valor] = (reg[mapping.valor] || 0) + v;
       }
     } else if (!itemRaw && valorCell !== 0) {
       reg.nao_identificado = (reg.nao_identificado || 0) + valorCell;
@@ -176,12 +184,15 @@ function parseWorkbook(arrayBuffer) {
     }
   }
 
-  const registros = Array.from(byFatura.values()).map((r) => {
-    const consumoTotal = (r.kwh || 0) + (r.consumo_ponta_kwh || 0) + (r.consumo_fora_ponta_kwh || 0);
-    const devGeracaoTotal = (r.dev_geracao || 0) + (r.dev_geracao_np || 0) + (r.dev_geracao_fp || 0);
-    const temGD = devGeracaoTotal !== 0 || (r.val_demanda_geracao || 0) !== 0;
-    return { ...r, consumo_total_kwh: consumoTotal, uc: r.instalacao, dev_geracao_total: devGeracaoTotal, tem_gd: temGD };
-  });
+  const registros = Array.from(byFatura.values())
+    // Faturas de estorno têm VALOR TOTAL negativo ou zero — descarta para não contaminar somas
+    .filter((r) => (r.valor_total == null || r.valor_total > 0))
+    .map((r) => {
+      const consumoTotal = (r.kwh || 0) + (r.consumo_ponta_kwh || 0) + (r.consumo_fora_ponta_kwh || 0);
+      const devGeracaoTotal = (r.dev_geracao || 0) + (r.dev_geracao_np || 0) + (r.dev_geracao_fp || 0);
+      const temGD = devGeracaoTotal !== 0 || (r.val_demanda_geracao || 0) !== 0;
+      return { ...r, consumo_total_kwh: consumoTotal, uc: r.instalacao, dev_geracao_total: devGeracaoTotal, tem_gd: temGD };
+    });
 
   return registros;
 }
