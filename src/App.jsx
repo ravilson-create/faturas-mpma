@@ -73,7 +73,8 @@ const ITEM_MAP = {
   "Demanda Ativa": { consumo: "demanda_ativa_kw", valor: "val_demanda_ativa" },
   "Demanda Ponta": { consumo: "demanda_ponta_kw", valor: "val_demanda_ponta" },
   "Demanda Fora Ponta": { consumo: "demanda_fora_ponta_kw", valor: "val_demanda_fora_ponta" },
-  "Demanda Ultrapassagem Ponta": { consumo: "demanda_ultrapassagem_kw", valor: "val_demanda_ultrapassagem" },
+  "Demanda Ultrapassagem": { consumo: "demanda_ultrapassagem_kw", valor: "val_demanda_ultrapassagem" },
+  "Demanda Ultrapassagem Ponta": { consumo: "demanda_ultrapassagem_ponta_kw", valor: "val_demanda_ultrapassagem_ponta" },
   "Demanda de Geração": { consumo: null, valor: "val_demanda_geracao" },
   "Consumo Reativo Excedente": { consumo: "reativo_excedente_kwh", valor: "val_reativo_excedente" },
   "Consumo Reativo Excedente FP": { consumo: "reativo_excedente_fp_kwh", valor: "val_reativo_excedente_fp" },
@@ -155,9 +156,24 @@ function parseWorkbook(arrayBuffer) {
       reg.nao_identificado = (reg.nao_identificado || 0) + valorCell;
     }
 
-    if (row["DEMANDA"] != null) reg.demanda_contratada_kw = Number(row["DEMANDA"]);
-    if (row["DEMANDA_PONTA"] != null) reg.demanda_ponta_col_kw = Number(row["DEMANDA_PONTA"]);
-    if (row["DEMANDA_FORA_PONTA"] != null) reg.demanda_fora_ponta_col_kw = Number(row["DEMANDA_FORA_PONTA"]);
+    // Demanda contratada: coluna DEMANDA (tarifas convencionais)
+    if (row["DEMANDA"] != null && !isNaN(Number(row["DEMANDA"])) && Number(row["DEMANDA"]) > 0) {
+      reg.demanda_contratada_kw = Number(row["DEMANDA"]);
+    }
+    // Demanda contratada horosazonal: DEMANDA_PONTA e DEMANDA_FORA_PONTA
+    // (aparecem nas linhas de Demanda Ultrapassagem/Ativa para tarifas horo-sazonais)
+    if (row["DEMANDA_PONTA"] != null && !isNaN(Number(row["DEMANDA_PONTA"])) && Number(row["DEMANDA_PONTA"]) > 0) {
+      reg.demanda_contratada_ponta_kw = Number(row["DEMANDA_PONTA"]);
+    }
+    if (row["DEMANDA_FORA_PONTA"] != null && !isNaN(Number(row["DEMANDA_FORA_PONTA"])) && Number(row["DEMANDA_FORA_PONTA"]) > 0) {
+      reg.demanda_contratada_fora_ponta_kw = Number(row["DEMANDA_FORA_PONTA"]);
+    }
+
+    // Flag direta de ultrapassagem: se a fatura tem item de Demanda Ultrapassagem com valor > 0
+    if ((itemRaw === "Demanda Ultrapassagem" || itemRaw === "Demanda Ultrapassagem Ponta") && valorCell > 0) {
+      reg.tem_ultrapassagem = true;
+      reg.val_ultrapassagem_total = (reg.val_ultrapassagem_total || 0) + valorCell;
+    }
   }
 
   const registros = Array.from(byFatura.values()).map((r) => {
@@ -418,11 +434,14 @@ export default function FaturasApp() {
 
   // ── Alertas ──────────────────────────────────────────────────────────────
 
-  // Alerta 1: ultrapassagem de demanda (medida > contratada)
+  // Alerta 1: ultrapassagem de demanda
+  // Fonte primária: item "Demanda Ultrapassagem" na fatura (tem_ultrapassagem=true)
+  // Fonte secundária (tarifas convencionais): demanda medida > demanda contratada
   const alertasUltrapassagem = useMemo(() => {
     return historicoUC.filter((r) => {
+      if (r.tem_ultrapassagem) return true;
       const contratada = r.demanda_contratada_kw || 0;
-      const medida = r.demanda_ativa_kw || r.demanda_ponta_kw || 0;
+      const medida = r.demanda_ativa_kw || 0;
       return contratada > 0 && medida > contratada;
     });
   }, [historicoUC]);
@@ -940,17 +959,30 @@ export default function FaturasApp() {
                         <div style={{ marginBottom: 12 }}>
                           <div style={{ fontSize: 12, fontWeight: 700, color: "#A32D2D", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
                             <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#A32D2D", display: "inline-block" }} />
-                            Ultrapassagem de demanda
+                            Ultrapassagem de demanda ({alertasUltrapassagem.length} {alertasUltrapassagem.length === 1 ? "ocorrência" : "ocorrências"})
                           </div>
                           {alertasUltrapassagem.map((r) => {
+                            const isHoro = r.demanda_contratada_ponta_kw > 0 || r.demanda_contratada_fora_ponta_kw > 0;
                             const contratada = r.demanda_contratada_kw || 0;
-                            const medida = r.demanda_ativa_kw || r.demanda_ponta_kw || 0;
-                            const excesso = medida - contratada;
-                            const pct = contratada > 0 ? ((excesso / contratada) * 100).toFixed(1) : "-";
+                            const medida = r.demanda_ativa_kw || 0;
+                            const ultrKw = r.demanda_ultrapassagem_kw || r.demanda_ultrapassagem_ponta_kw || 0;
+                            const ultrVal = r.val_ultrapassagem_total || r.val_demanda_ultrapassagem || 0;
                             return (
-                              <div key={r.fatura} style={{ fontSize: 12.5, color: INK, background: "#FDECEA", borderRadius: 6, padding: "6px 10px", marginBottom: 4 }}>
-                                <strong>{monthLabel(r.mes_referencia)}</strong> — medida {fmtNumber(medida, 0)} kW vs contratada {fmtNumber(contratada, 0)} kW
-                                {" "}(<span style={{ color: "#A32D2D", fontWeight: 700 }}>+{pct}%</span>)
+                              <div key={r.fatura} style={{ fontSize: 12.5, color: INK, background: "#FDECEA", borderRadius: 6, padding: "8px 10px", marginBottom: 4 }}>
+                                <strong>{monthLabel(r.mes_referencia)}</strong>
+                                {isHoro ? (
+                                  <span> — tarifa horosazonal · contratada ponta {fmtNumber(r.demanda_contratada_ponta_kw, 0)} kW / fora ponta {fmtNumber(r.demanda_contratada_fora_ponta_kw, 0)} kW</span>
+                                ) : contratada > 0 ? (
+                                  <span> — medida {fmtNumber(medida, 1)} kW vs contratada {fmtNumber(contratada, 0)} kW
+                                    {" "}(<span style={{ color: "#A32D2D", fontWeight: 700 }}>+{(((medida - contratada) / contratada) * 100).toFixed(1)}%</span>)
+                                  </span>
+                                ) : null}
+                                {ultrKw > 0 && (
+                                  <span> · excesso <strong>{fmtNumber(ultrKw, 2)} kW</strong></span>
+                                )}
+                                {ultrVal > 0 && (
+                                  <span> · custo <strong style={{ color: "#A32D2D" }}>{fmtCurrency(ultrVal)}</strong></span>
+                                )}
                               </div>
                             );
                           })}
