@@ -117,7 +117,19 @@ function parseWorkbook(arrayBuffer) {
   const wb = XLSX.read(arrayBuffer, { type: "array", cellDates: true });
   const sheetName = wb.SheetNames[0];
   const ws = wb.Sheets[sheetName];
-  const rows = XLSX.utils.sheet_to_json(ws, { defval: null, raw: true });
+  const rowsRaw = XLSX.utils.sheet_to_json(ws, { defval: null, raw: true });
+
+  // Remove linhas totalmente idênticas (a exportação da Equatorial às vezes
+  // repete a mesma linha de cobrança, o que inflava demanda e valores ao somar)
+  const vistos = new Set();
+  const rows = rowsRaw.filter((row) => {
+    const assinatura = JSON.stringify([
+      row["NUMERO_FATURA"], row["DETALHAMENTO_CONTA"], row["CONSUMO"], row["VALOR_FATURA"]
+    ]);
+    if (vistos.has(assinatura)) return false;
+    vistos.add(assinatura);
+    return true;
+  });
 
   const byFatura = new Map();
 
@@ -153,7 +165,16 @@ function parseWorkbook(arrayBuffer) {
 
     if (mapping) {
       if (mapping.consumo && consumoCell != null) {
-        reg[mapping.consumo] = (reg[mapping.consumo] || 0) + (Number(consumoCell) || 0);
+        const num = Number(consumoCell) || 0;
+        // Campos de DEMANDA (kW) são valores de pico — usa-se o MAIOR valor positivo
+        // registrado, nunca a soma (somar linhas repetidas inflava a demanda medida
+        // e gerava ultrapassagem falsa). Demais campos (kWh) acumulam normalmente.
+        const ehDemanda = mapping.consumo.startsWith("demanda_");
+        if (ehDemanda) {
+          reg[mapping.consumo] = Math.max(reg[mapping.consumo] || 0, num);
+        } else {
+          reg[mapping.consumo] = (reg[mapping.consumo] || 0) + num;
+        }
       }
       if (mapping.valor) {
         // Tributos retidos vêm com sinal negativo no arquivo — armazenar como positivo
