@@ -392,8 +392,23 @@ export default function FaturasApp() {
   }, [registros, anoSelecionado, usarFiltroPeriodo, periodoInicio, periodoFim]);
 
   // Resumo do período/ano selecionado — sempre baseado em registrosFiltrados
+  // Deduplica por UC+mês mantendo o registro de maior valor_total (mais completo).
+  // Protege contra faturas duplicadas vindas da planilha da concessionária ou
+  // de dados residuais de uploads anteriores com número de fatura diferente.
+  const registrosDeduplicados = useMemo(() => {
+    const porChave = new Map();
+    for (const r of registrosFiltrados) {
+      const chave = `${r.uc}|${r.mes_referencia}`;
+      const existente = porChave.get(chave);
+      if (!existente || (r.valor_total || 0) > (existente.valor_total || 0)) {
+        porChave.set(chave, r);
+      }
+    }
+    return Array.from(porChave.values());
+  }, [registrosFiltrados]);
+
   const resumoAno = useMemo(() => {
-    const base = registrosFiltrados;
+    const base = registrosDeduplicados;
     const totalFaturado = base.reduce((acc, r) => acc + (r.valor_total || 0), 0);
     const totalConsumo = base.reduce((acc, r) => acc + (r.consumo_total_kwh || 0), 0);
     const totalCip = base.reduce((acc, r) => acc + (r.cip || 0), 0);
@@ -404,7 +419,7 @@ export default function FaturasApp() {
     const meses = new Set(base.map((r) => r.mes_referencia)).size;
     const ucs = new Set(base.map((r) => r.uc)).size;
     return { totalFaturado, totalConsumo, totalCip, totalICMS, totalCOFINS, totalPIS, totalGD, meses, ucs };
-  }, [registrosFiltrados]);
+  }, [registrosDeduplicados]);
 
   const ucList = useMemo(() => {
     const map = new Map();
@@ -429,10 +444,10 @@ export default function FaturasApp() {
 
   const historicoUC = useMemo(() => {
     if (!selectedUC) return [];
-    return registrosFiltrados
+    return registrosDeduplicados
       .filter((r) => r.uc === selectedUC)
       .sort((a, b) => new Date(a.mes_referencia) - new Date(b.mes_referencia));
-  }, [registrosFiltrados, selectedUC]);
+  }, [registrosDeduplicados, selectedUC]);
 
   const isAltaTensao = useMemo(() => {
     return historicoUC.some((r) => (r.categoria || "").toUpperCase().includes("ALTA"));
