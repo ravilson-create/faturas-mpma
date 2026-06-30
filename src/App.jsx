@@ -518,23 +518,42 @@ export default function FaturasApp() {
   }, [historicoUC]);
 
   const recomendacaoCapacitor = useMemo(() => {
-    // Só calcula se houve mais de 4 ocorrências no ano calendário do último mês com reativo
+    // Só calcula se houve mais de 4 ocorrências no período analisado
     if (alertasReativo.length <= 4) return null;
 
-    // Usa o mês com maior kVAr excedente como referência para o dimensionamento
+    // Calcula dias faturados de cada fatura (data leitura atual - anterior).
+    // Fallback de 30 dias quando as datas não estiverem disponíveis.
+    function diasFaturados(r) {
+      if (r.data_leitura_anterior && r.data_leitura_atual) {
+        const d1 = new Date(r.data_leitura_anterior);
+        const d2 = new Date(r.data_leitura_atual);
+        const dias = Math.round((d2 - d1) / (1000 * 60 * 60 * 24));
+        if (dias > 0 && dias < 60) return dias;
+      }
+      return 30;
+    }
+
+    // O campo "Reativo Excedente" da planilha é ENERGIA reativa acumulada no
+    // período faturado (kVArh) — não potência instantânea (kVAr). Por isso,
+    // antes de comparar com a demanda ativa (kW, instantânea), é necessário
+    // convertê-lo para potência reativa MÉDIA dividindo pelas horas do período.
+    function kVArMedioDoMes(r) {
+      const kVArh = (r.reativo_excedente_kwh || 0) + (r.reativo_excedente_fp_kwh || 0) + (r.reativo_excedente_np_kwh || 0);
+      const horas = diasFaturados(r) * 24;
+      return horas > 0 ? kVArh / horas : 0;
+    }
+
+    // Usa o mês com maior kVAr médio (já convertido) como referência
     const pior = alertasReativo.reduce((max, r) => {
-      const kvar = (r.reativo_excedente_kwh || 0) + (r.reativo_excedente_fp_kwh || 0) + (r.reativo_excedente_np_kwh || 0);
-      const kvarMax = (max.reativo_excedente_kwh || 0) + (max.reativo_excedente_fp_kwh || 0) + (max.reativo_excedente_np_kwh || 0);
-      return kvar > kvarMax ? r : max;
+      return kVArMedioDoMes(r) > kVArMedioDoMes(max) ? r : max;
     }, alertasReativo[0]);
 
     const kW = pior.demanda_ativa_kw || pior.kwh || 0;
-    const kVArExcedente = (pior.reativo_excedente_kwh || 0) + (pior.reativo_excedente_fp_kwh || 0) + (pior.reativo_excedente_np_kwh || 0);
+    const kVArExcedenteMedio = kVArMedioDoMes(pior);
 
-    if (kW === 0 || kVArExcedente === 0) return null;
+    if (kW === 0 || kVArExcedenteMedio === 0) return null;
 
     // Limite ANEEL: FP mínimo = 0,92 indutivo
-    // kVAr permitido = kW × tan(arccos(0,92))
     const FP_LIMITE = 0.92;
     const FP_ALVO = 0.95; // margem de segurança acima do mínimo legal
     const TENSAO_V = 13800; // média tensão 13,8 kV
@@ -543,13 +562,18 @@ export default function FaturasApp() {
     const tanLimite = Math.tan(Math.acos(FP_LIMITE)); // ≈ 0.3936
     const tanAlvo = Math.tan(Math.acos(FP_ALVO));     // ≈ 0.3287
     const kVArPermitido = kW * tanLimite;
-    const kVArTotal = kVArExcedente + kVArPermitido;
+    const kVArTotal = kVArExcedenteMedio + kVArPermitido;
     const kVA = Math.sqrt(kW * kW + kVArTotal * kVArTotal);
     const fpAtual = kW / kVA;
+
+    // Se o FP corrigido já está acima do alvo, não há necessidade de capacitor
+    if (fpAtual >= FP_ALVO) return null;
 
     // Potência reativa necessária para corrigir de fpAtual para FP_ALVO
     const tanAtual = Math.tan(Math.acos(fpAtual));
     const Qc_kVAr = kW * (tanAtual - tanAlvo);
+
+    if (Qc_kVAr <= 0) return null;
 
     // Capacitância por fase — banco trifásico em triângulo (ligação Δ), 13,8 kV
     // Q_total = 3 × V² × 2πfC  →  C = Q_total / (3 × 2πf × V²)
@@ -562,8 +586,8 @@ export default function FaturasApp() {
 
     return {
       kW: kW.toFixed(1),
-      kVArExcedente: kVArExcedente.toFixed(1),
-      kVArTotal: kVArTotal.toFixed(1),
+      kVArExcedente: kVArExcedenteMedio.toFixed(2),
+      kVArTotal: kVArTotal.toFixed(2),
       fpAtual: fpAtual.toFixed(3),
       Qc_kVAr: Qc_kVAr.toFixed(1),
       Qc_padronizado,
@@ -1126,9 +1150,22 @@ export default function FaturasApp() {
                                     Fórmula: C = Q / (3 × 2πf × V²) · Alvo de correção: FP ≥ 0,95
                                     · Base: ANEEL Res. 1.000/2021 + NBR 5410
                                   </div>
+                                  <div style={{ fontSize: 10, opacity: 0.65, marginTop: 4 }}>
+                                    Nota: o reativo excedente faturado (kVArh, energia acumulada no período) foi
+                                    convertido para potência reativa média (kVAr) dividindo pelas horas do
+                                    período faturado, antes de ser comparado à demanda ativa instantânea (kW).
+                                  </div>
                                 </div>
                               </div>
                             </div>
+                          )}
+
+                          {alertasReativo.length > 4 && !recomendacaoCapacitor && (
+                            <p style={{ fontSize: 12, color: "#3B6D11", marginTop: 8, marginBottom: 0 }}>
+                              Há {alertasReativo.length} ocorrências de reativo excedente, mas o fator de potência
+                              estimado já está dentro ou próximo da meta — não foi identificada necessidade de
+                              banco de capacitores com os dados disponíveis.
+                            </p>
                           )}
 
                           {alertasReativo.length > 0 && alertasReativo.length <= 4 && (
