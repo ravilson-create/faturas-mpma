@@ -620,7 +620,182 @@ export default function FaturasApp() {
     return alertas;
   }, [historicoUC]);
 
-  const temAlertas = alertasUltrapassagem.length > 0 || alertaConsumo !== null || alertasReativo.length > 0 || alertasCIP.length > 0;
+  // Alerta 5: subcarga — demanda medida < 30% da contratada por 12 meses consecutivos
+  const alertaSubcarga = useMemo(() => {
+    if (!isAltaTensao) return null;
+    const ultimos12 = historicoUC.slice(-12);
+    if (ultimos12.length < 12) return null;
+    const elegíveis = ultimos12.filter((r) => {
+      const contratada = r.demanda_contratada_kw || 0;
+      const medida = r.demanda_ativa_kw || 0;
+      return contratada > 0 && medida > 0 && medida < contratada * 0.30;
+    });
+    if (elegíveis.length < 12) return null;
+    const maiorMedida = Math.max(...ultimos12.map((r) => r.demanda_ativa_kw || 0));
+    const sugerida = Math.ceil(maiorMedida * 1.10 / 5) * 5; // arredonda para múltiplo de 5 kW acima
+    return {
+      meses: ultimos12.length,
+      maiorMedida: maiorMedida.toFixed(0),
+      sugerida,
+      periodoInicio: ultimos12[0].mes_referencia,
+      periodoFim: ultimos12[ultimos12.length - 1].mes_referencia,
+      contratadaAtual: ultimos12[ultimos12.length - 1].demanda_contratada_kw,
+    };
+  }, [historicoUC, isAltaTensao]);
+
+  // Alerta 6: ultrapassagem recorrente — 8+ meses com ultrapassagem → sugerir aumento
+  const alertaUltrapassagemRecorrente = useMemo(() => {
+    if (!isAltaTensao) return null;
+    const comUltrapassagem = historicoUC.filter((r) => r.tem_ultrapassagem);
+    if (comUltrapassagem.length < 8) return null;
+    // Usa o maior valor medido de demanda ativa no intervalo como base da sugestão
+    const maiorMedida = Math.max(...comUltrapassagem.map((r) => r.demanda_ativa_kw || 0));
+    const sugerida = Math.ceil(maiorMedida / 5) * 5; // arredonda para múltiplo de 5 kW acima
+    return {
+      ocorrencias: comUltrapassagem.length,
+      maiorMedida: maiorMedida.toFixed(0),
+      sugerida,
+      contratadaAtual: historicoUC[historicoUC.length - 1]?.demanda_contratada_kw || 0,
+    };
+  }, [historicoUC, isAltaTensao]);
+
+  const temAlertas = alertasUltrapassagem.length > 0 || alertaConsumo !== null ||
+    alertasReativo.length > 0 || alertasCIP.length > 0 ||
+    alertaSubcarga !== null || alertaUltrapassagemRecorrente !== null;
+
+  // ── Sumário global de alertas (para relatório PDF) ───────────────────────
+  const sumarioAlertas = useMemo(() => {
+    const resultado = [];
+    for (const uc of ucList) {
+      const hist = registrosDeduplicados
+        .filter((r) => r.uc === uc.uc)
+        .sort((a, b) => new Date(a.mes_referencia) - new Date(b.mes_referencia));
+      if (hist.length === 0) continue;
+      const altaTensao = hist.some((r) => (r.categoria || "").toUpperCase().includes("ALTA"));
+      const alertas = [];
+
+      // Ultrapassagem de demanda
+      const ultrap = hist.filter((r) => r.tem_ultrapassagem || ((r.demanda_contratada_kw||0) > 0 && (r.demanda_ativa_kw||0) > (r.demanda_contratada_kw||0)));
+      if (ultrap.length > 0) alertas.push({ tipo: "🔴 Ultrapassagem de demanda", detalhe: `${ultrap.length} ${ultrap.length === 1 ? "ocorrência" : "ocorrências"}` });
+
+      // Variação de consumo > 20%
+      if (hist.length >= 2) {
+        const ult = hist[hist.length - 1];
+        const ant = hist.slice(-7, -1);
+        if (ant.length > 0) {
+          const media = ant.reduce((a, r) => a + (r.consumo_total_kwh || 0), 0) / ant.length;
+          const v = media > 0 ? ((ult.consumo_total_kwh || 0) - media) / media : 0;
+          if (v > 0.2) alertas.push({ tipo: "🟡 Variação de consumo", detalhe: `+${(v * 100).toFixed(1)}% acima da média dos 6 meses anteriores` });
+        }
+      }
+
+      // Reativo excedente
+      const reat = hist.filter((r) => (r.val_reativo_excedente||0)+(r.val_reativo_excedente_fp||0)+(r.val_reativo_excedente_np||0) > 0);
+      if (reat.length > 0) {
+        const custo = reat.reduce((a, r) => a + (r.val_reativo_excedente||0)+(r.val_reativo_excedente_fp||0)+(r.val_reativo_excedente_np||0), 0);
+        alertas.push({ tipo: "🟠 Reativo excedente", detalhe: `${reat.length} ${reat.length === 1 ? "mês" : "meses"} · custo total ${fmtCurrency(custo)}${reat.length > 4 ? " · recomenda banco de capacitores" : ""}` });
+      }
+
+      // Aumento de CIP
+      const cipAlertas = [];
+      for (let i = 1; i < hist.length; i++) {
+        if ((hist[i].cip||0) > (hist[i-1].cip||0) && (hist[i-1].cip||0) > 0) cipAlertas.push(hist[i]);
+      }
+      if (cipAlertas.length > 0) alertas.push({ tipo: "🔵 Aumento de CIP", detalhe: `${cipAlertas.length} ${cipAlertas.length === 1 ? "ocorrência" : "ocorrências"}` });
+
+      // Subcarga
+      const ult12 = hist.slice(-12);
+      if (altaTensao && ult12.length === 12) {
+        const sub = ult12.filter((r) => (r.demanda_contratada_kw||0)>0 && (r.demanda_ativa_kw||0)>0 && (r.demanda_ativa_kw||0) < (r.demanda_contratada_kw||0)*0.30);
+        if (sub.length === 12) {
+          const maior = Math.max(...ult12.map((r) => r.demanda_ativa_kw||0));
+          const sug = Math.ceil(maior*1.10/5)*5;
+          alertas.push({ tipo: "⬇️ Subcarga — reduzir demanda", detalhe: `Medida sempre < 30% da contratada (${fmtNumber(ult12[ult12.length-1].demanda_contratada_kw||0,0)} kW) por 12 meses · sugerida: ${sug} kW` });
+        }
+      }
+
+      // Ultrapassagem recorrente
+      if (altaTensao && ultrap.length >= 8) {
+        const maior = Math.max(...ultrap.map((r) => r.demanda_ativa_kw||0));
+        const sug = Math.ceil(maior/5)*5;
+        alertas.push({ tipo: "⬆️ Ultrapassagem recorrente — aumentar demanda", detalhe: `${ultrap.length} meses · demanda atual ${fmtNumber(hist[hist.length-1].demanda_contratada_kw||0,0)} kW · sugerida: ${sug} kW` });
+      }
+
+      if (alertas.length > 0) resultado.push({ uc: uc.uc, municipio: uc.municipio, complemento: uc.complemento, alertas });
+    }
+    return resultado;
+  }, [registrosDeduplicados, ucList]);
+
+  // ── Geração do relatório PDF ──────────────────────────────────────────────
+  const gerarRelatorioPDF = useCallback(() => {
+    const periodo = usarFiltroPeriodo
+      ? `${periodoInicio || "início"} a ${periodoFim || "fim"}`
+      : anoSelecionado === "todos" ? "Todo o histórico" : `Ano ${anoSelecionado}`;
+
+    const linhasUC = sumarioAlertas.map((item) => `
+      <div class="uc-bloco">
+        <div class="uc-header">
+          <span class="uc-municipio">${item.municipio}</span>
+          <span class="uc-complemento">${item.complemento || ""}</span>
+          <span class="uc-numero">UC ${item.uc}</span>
+        </div>
+        ${item.alertas.map((a) => `
+          <div class="alerta-linha">
+            <span class="alerta-tipo">${a.tipo}</span>
+            <span class="alerta-detalhe">${a.detalhe}</span>
+          </div>`).join("")}
+      </div>`).join("");
+
+    const html = `<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="UTF-8"/>
+<title>Relatório de Alertas — Energia MPMA</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Arial,sans-serif;font-size:11px;color:#1a1a1a;padding:24px 32px}
+.cab{display:flex;align-items:center;gap:16px;border-bottom:2px solid #BA7517;padding-bottom:12px;margin-bottom:18px}
+.cab img{height:44px}
+.cab h1{font-size:15px;font-weight:700;color:#633806}
+.cab p{font-size:10px;color:#666;margin-top:2px}
+.meta{display:flex;gap:28px;background:#F7F6F2;padding:10px 14px;border-radius:6px;margin-bottom:18px}
+.ml{font-size:9px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.05em}
+.mv{font-size:12px;font-weight:700;margin-top:2px}
+.uc-bloco{margin-bottom:12px;border:1px solid #ddd;border-radius:6px;overflow:hidden;page-break-inside:avoid}
+.uc-header{background:#F7F6F2;padding:7px 12px;display:flex;align-items:baseline;gap:8px;border-bottom:1px solid #ddd}
+.uc-municipio{font-weight:700;font-size:12px}
+.uc-complemento{color:#555;font-size:11px;flex:1}
+.uc-numero{font-family:monospace;font-size:10px;color:#888}
+.alerta-linha{display:flex;gap:12px;padding:5px 12px;border-bottom:1px solid #f0f0f0;align-items:baseline}
+.alerta-linha:last-child{border-bottom:none}
+.alerta-tipo{font-weight:700;min-width:260px;font-size:11px}
+.alerta-detalhe{color:#333;font-size:11px}
+.rodape{margin-top:20px;padding-top:10px;border-top:1px solid #ddd;font-size:9px;color:#999;display:flex;justify-content:space-between}
+.vazio{text-align:center;padding:40px;color:#888;font-size:13px}
+@media print{body{padding:10px 18px}@page{margin:14mm;size:A4}}
+</style></head><body>
+<div class="cab">
+  <img src="https://www.mpma.mp.br/wp-content/uploads/2022/09/mpma-hs.png" alt="MPMA" onerror="this.style.display='none'"/>
+  <div><h1>Relatório de Alertas — Gestão de Energia Elétrica</h1>
+  <p>Ministério Público do Maranhão · Coordenadoria de Engenharia e Arquitetura</p></div>
+</div>
+<div class="meta">
+  <div><div class="ml">Período</div><div class="mv">${periodo}</div></div>
+  <div><div class="ml">UCs com alertas</div><div class="mv">${sumarioAlertas.length}</div></div>
+  <div><div class="ml">Total de alertas</div><div class="mv">${sumarioAlertas.reduce((a,i)=>a+i.alertas.length,0)}</div></div>
+  <div><div class="ml">Emitido em</div><div class="mv">${new Date().toLocaleString("pt-BR",{day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"})}</div></div>
+</div>
+${sumarioAlertas.length===0?'<div class="vazio">Nenhum alerta ativo para o período selecionado.</div>':linhasUC}
+<div class="rodape">
+  <span>MPMA · Sistema de Gestão de Faturas de Energia</span>
+  <span>Documento gerado automaticamente — uso interno</span>
+</div>
+</body></html>`;
+
+    const janela = window.open("", "_blank", "width=900,height=700");
+    if (!janela) { alert("Permita pop-ups para este site para gerar o relatório."); return; }
+    janela.document.write(html);
+    janela.document.close();
+    janela.onload = () => { setTimeout(() => janela.print(), 300); };
+  }, [sumarioAlertas, usarFiltroPeriodo, periodoInicio, periodoFim, anoSelecionado]);
 
   return (
     <div style={{ fontFamily: "Inter, system-ui, sans-serif", background: BG, minHeight: "100vh", color: INK }}>
@@ -658,6 +833,16 @@ export default function FaturasApp() {
             }}
           >
             {autenticado ? (mostrarPainelAdmin ? "Fechar administração" : "Administração") : "🔒 Administração"}
+          </button>
+          <button
+            onClick={gerarRelatorioPDF}
+            style={{
+              padding: "8px 16px", borderRadius: 8, border: `1px solid #185FA5`,
+              background: "#EAF2FB", cursor: "pointer",
+              fontSize: 13, fontWeight: 600, color: "#185FA5", fontFamily: "inherit",
+            }}
+          >
+            📄 Relatório PDF{sumarioAlertas.length > 0 ? ` (${sumarioAlertas.length})` : ""}
           </button>
         </header>
 
@@ -1189,6 +1374,55 @@ export default function FaturasApp() {
                               {" "}(<span style={{ color: "#185FA5", fontWeight: 700 }}>+{fmtCurrency(a.aumento)} · +{a.pct.toFixed(1)}%</span>)
                             </div>
                           ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {(alertaSubcarga || alertaUltrapassagemRecorrente) && (
+                    <div style={{ background: "#F0FFF4", border: "1px solid #A8D5B5", borderRadius: 12, padding: "16px 20px", marginBottom: 16 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+                        <span style={{ fontSize: 16 }}>📋</span>
+                        <h3 style={{ fontSize: 13, fontWeight: 700, color: "#1A5C2A", margin: 0 }}>
+                          Recomendação de revisão da demanda contratada
+                        </h3>
+                      </div>
+
+                      {alertaSubcarga && (
+                        <div style={{ background: CARD, border: "1px solid #A8D5B5", borderRadius: 8, padding: "12px 14px", marginBottom: alertaUltrapassagemRecorrente ? 10 : 0 }}>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: "#1A5C2A", marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
+                            ⬇️ Subcarga — reduzir demanda contratada
+                          </div>
+                          <p style={{ fontSize: 12.5, color: INK, lineHeight: 1.6, marginBottom: 10 }}>
+                            Durante os <strong>12 meses consecutivos</strong> analisados
+                            ({monthLabel(alertaSubcarga.periodoInicio)} a {monthLabel(alertaSubcarga.periodoFim)}),
+                            a demanda medida esteve sempre <strong>abaixo de 30% da demanda contratada</strong>
+                            ({fmtNumber(alertaSubcarga.contratadaAtual, 0)} kW). Isso representa pagamento por
+                            capacidade instalada que não está sendo utilizada.
+                          </p>
+                          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
+                            <Metric label="Demanda contratada atual" value={`${fmtNumber(alertaSubcarga.contratadaAtual, 0)} kW`} />
+                            <Metric label="Maior medição nos 12 meses" value={`${fmtNumber(alertaSubcarga.maiorMedida, 0)} kW`} />
+                            <Metric label="Demanda sugerida (+10% do pico)" value={`${alertaSubcarga.sugerida} kW`} alert="yellow" />
+                          </div>
+                        </div>
+                      )}
+
+                      {alertaUltrapassagemRecorrente && (
+                        <div style={{ background: CARD, border: "1px solid #F5A9A9", borderRadius: 8, padding: "12px 14px" }}>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: "#A32D2D", marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
+                            ⬆️ Ultrapassagem recorrente — aumentar demanda contratada
+                          </div>
+                          <p style={{ fontSize: 12.5, color: INK, lineHeight: 1.6, marginBottom: 10 }}>
+                            Foram registradas <strong>{alertaUltrapassagemRecorrente.ocorrencias} ocorrências</strong> de
+                            ultrapassagem de demanda no período. Ultrapassagens recorrentes geram multas
+                            tarifárias evitáveis — o ajuste da demanda contratada elimina esse custo.
+                          </p>
+                          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
+                            <Metric label="Demanda contratada atual" value={`${fmtNumber(alertaUltrapassagemRecorrente.contratadaAtual, 0)} kW`} />
+                            <Metric label="Maior demanda medida" value={`${fmtNumber(alertaUltrapassagemRecorrente.maiorMedida, 0)} kW`} />
+                            <Metric label="Demanda sugerida" value={`${alertaUltrapassagemRecorrente.sugerida} kW`} alert="red" />
+                          </div>
                         </div>
                       )}
                     </div>
